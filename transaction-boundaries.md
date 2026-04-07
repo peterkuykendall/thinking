@@ -146,8 +146,6 @@ But when a read determines a write:
 
 > the read moves into the transactional write path, typically by executing it within the same write repository using the same transaction
 
-This is the only place CQRS is broken, and it is done to preserve correctness.
-
 ## How it works
 
 - Default:  
@@ -167,8 +165,6 @@ In practice, this sometimes means:
 - duplicating a query from the read repsoitory inside the write repository  
 - or moving a read from the read path into the write path  
 
-This is a deliberate break from strict CQRS to preserve correctness.
-
 ## Why this holds up
 
 This avoids the most common “looks correct but isn’t” pattern:
@@ -187,7 +183,6 @@ And it keeps transactions scoped to the flows that actually need atomicity.
 ## What this is not
 
 This is not:
-- abandoning CQRS  
 - making transactions implicit everywhere  
 - hiding database behavior  
 - using `context.Context` as a grab bag for arbitrary dependencies  
