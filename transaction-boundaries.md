@@ -77,30 +77,97 @@ Keeping all reads in the read model, even when they drive write decisions.
 
 This preserves structure, but breaks correctness.
 
-## The decision
+## The design constraints
 
-We pass the active `*gorm.DB` transaction through `context.Context` for write flows that require atomicity.
+We were balancing several competing constraints:
 
-And more importantly:
+- Preserve CQRS separation:
+  - read paths optimized for queries  
+  - write paths optimized for mutation  
 
-> When a decision requires atomicity, the read moves into the transactional write path.
+- Maintain atomicity across decision flows:
+  - reads that drive decisions must be protected  
 
-## How it works
+- Avoid transaction plumbing everywhere:
+  - passing `*gorm.DB` through every method bloats signatures  
+  - leaks infrastructure into business logic  
+
+- Avoid over-engineering:
+  - these are single-database, low-latency operations  
+  - sagas and workflow orchestration add unnecessary complexity  
+
+Each of these is reasonable on its own. The difficulty is that they conflict.
+
+## The design
+
+The core rule is simple:
+
+> If a decision depends on a read, and that decision must be correct, the read and write happen in the same transaction.
+
+From that, three choices follow:
+
+1. Transactions are scoped to business operations, not layers  
+2. The active transaction is carried via `context.Context`  
+3. Decision-bearing reads move into the transactional write path  
+
+### How it works
 
 - Default:  
   - read repos are non-transactional  
   - write repos handle mutations  
 
 - Transactional flows:  
-  - service starts TX and injects into context  
-  - write path consumes TX from context  
-  - decision-bearing reads execute within the same TX  
+  - service starts a transaction  
+  - transaction is injected into `context.Context`  
+  - write path consumes the transaction  
+  - decision-bearing reads execute within the same transaction  
 
 In some cases, this means:
 - duplicating a read query inside the write repo  
 - or moving a read from the read model into the write path  
 
 This is deliberate.
+
+### Why context
+
+Most advice says not to put transactions in `context.Context`. Usually the reasoning is directionally right but imprecise: context should not become a grab bag for arbitrary dependencies or long-lived application state.
+
+A transaction is different. It is created for a single business operation, exists only for the lifetime of that operation, and is discarded when the operation completes. It is not configuration. It is not a shared service. It is execution-bound state.
+
+That makes the question less “is DB in context forbidden?” and more “does this value belong to the request boundary?” In our case, the answer was yes.
+
+### Where CQRS is intentionally broken
+
+CQRS is preserved by default:
+- read paths for queries  
+- write paths for mutation  
+
+But when a read determines a write:
+
+> the read moves into the transactional write path, typically by executing it within the same write repository using the same transaction
+
+This is the only place CQRS is broken, and it is done to preserve correctness.
+
+## How it works
+
+- Default:  
+  - read repos are non-transactional  
+  - write repos use the injected database handle
+
+- Transactional flows:  
+  - service starts a transaction and attaches it to `context.Context`
+  - write repos resolve the transaction from context  
+  - decision-bearing reads execute within the same transaction  
+
+Write repos use the transaction from context when present; otherwise they use the injected database handle.
+
+When a read determines a write, it must execute within the same transaction.
+
+In practice, this sometimes means:
+- duplicating a query from the read repsoitory inside the write repository  
+- or moving a read from the read path into the write path  
+
+This is a deliberate break from strict CQRS to preserve correctness.
 
 ## Why this holds up
 
@@ -123,6 +190,9 @@ This is not:
 - abandoning CQRS  
 - making transactions implicit everywhere  
 - hiding database behavior  
+- using `context.Context` as a grab bag for arbitrary dependencies  
+
+`context.Context` is only used for execution-bound state tied to the lifetime of a request, not for general dependency passing.
 
 It requires being explicit about:
 - which flows require atomicity  
